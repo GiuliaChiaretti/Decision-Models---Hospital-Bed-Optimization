@@ -1,0 +1,611 @@
+---
+title: 'Department Bed Optimization - Case Study'
+author: 'Chiaretti Giulia (800928), Fiorentini Federica (807124)'
+date: "15 Luglio 2019"
+output:
+  pdf_document:
+    df_print: paged
+    highlight: tango
+    toc: yes
+    toc_depth: 5
+---
+### Introduzione
+Il Charity Hospital è un centro ospedaliero il cui obiettivo è quello di fornire un servizio di alta qualità ai propri pazienti in termini di ricoveri e cura post-operatoria. Lo scopo di questo progetto, quindi, consiste nel cercare di modificare la policy dell'ospedale per migliorare ancor di più le prestazioni. L'analisi, perciò, consiste nella creazione di due procedimenti euristici costruiti ad hoc per fornire delle proposte data-driven sulle informazioni a disposizione. L'obiettivo è capire quale sia la soluzione migliore per riuscire a soddisfare la richiesta dei medici di avere i propri pazienti ricoverati nel reparto stesso e non trasferiti altrove.
+In particolare, sono stati sviluppati due algoritmi che modificano la policy dell'ospedale rispettivamente riguardo il tempo d'attesa e il numero di letti presenti nel reparto basandosi su dati riguardanti il flusso dei pazienti nel reparto di medicina interna durante il 2015.
+
+```{r r_setup, include = FALSE}
+knitr::opts_chunk$set(comment = NA, echo = TRUE, error = TRUE, cache = FALSE, message = FALSE, dpi = 200, warning = FALSE)
+options(width = 250, scipen = 100, max.print = 5000,  stringsAsFactors = FALSE)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(openxlsx)
+```
+
+### Dataset
+
+Ai fini dell'analisi è stato utilizzato il dataset "Charity Hospital Department Bed Optimization data.xlsx" che contiene i seguenti tre tab:
+
+-	*Section*: dataset contenente, per ogni reparto dell' ospedale, identificato da un codice, il numero di letti a disposizione. In questo caso sono disponibili dati solamente sul reparto 8000595 (Internal Medicine) che ha a disposizione 19 letti;
+
+-	*Historical_Info*: dataset riferito ai giorni dal 01/01/2015 al 06/12/2015 che contiene, il numero di letti occupati a mezzanotte di ogni giorno nel reparto di Internal Medicine;
+-	*Patients*: dataset che contiene informazioni relative ai 4177 pazienti che hanno subito un intervento nell'ospedale tra il 01/01/2015 e il 01/12/2015. In particolare, il dataset contiene 8 variabili: "Patient_ID","Surgery_Type",  "Arrival_Date","Arrival Time",  "Section",  "Surgery_Time (minute)",  "POST_ANESTHESIA_CARE_UNIT_Time (min)",  "Length_of_Stay(days)"
+
+```{r message=FALSE, warning=FALSE}
+Section = read_excel("C:/Users/GiuliaChiaretti(Stag/Desktop/DECISION MODELS/PROGETTO DECISION MODELS/Charity Hospital Department Bed Optimization data.xlsx",
+                     sheet = "Section")
+
+Historical_Info = read.csv("C:/Users/GiuliaChiaretti(Stag/Desktop/DECISION MODELS/PROGETTO DECISION MODELS/Historical_Info.csv", sep=';') 
+colnames(Historical_Info)[4]='nr_patients'
+
+Patients = read.csv("C:/Users/GiuliaChiaretti(Stag/Desktop/DECISION MODELS/PROGETTO DECISION MODELS/Patients.csv",sep=';')
+
+colnames(Patients) <- c("Patient_ID","Surgery_Type",  "Arrival_Date",
+                        "Arrival Time",  "Section",  "Surgery_Time (minute)", 
+                        "POST_ANESTHESIA_CARE_UNIT_Time (min)",  "Length_of_Stay(days)")
+```
+
+### Preprocessing
+
+A seguito dell'importazione dei dati sono stati effettuati una serie di operazioni di preprocessing, in particolare:
+- è stata creata la variabile "Arrival_Time(min)", che esprime l'orario di arrivo espresso in minuti;
+- le variabili POST_ANESTHESIA_CARE_UNIT_Time (min) e Surgery_Time (minute) sono state impostate come numeriche;
+- la variabile Arrival_Date è stata impostata come data;
+- è stata eliminata la variabile Arrival Time (in quanto sostituita da Arrival_Time(min)).
+
+```{r message=FALSE, warning=FALSE}
+Patients <- Patients %>% 
+  
+  mutate(`Arrival_Time(min)` = 
+           difftime(as.POSIXct(`Arrival Time` , format = '%H:%M'),
+                    as.POSIXct('00:00', format = '%H:%M'), units = 'min')) %>% 
+  mutate (`POST_ANESTHESIA_CARE_UNIT_Time (min)`= 
+            as.numeric(gsub(",", ".",gsub("\\.", "", Patients$`POST_ANESTHESIA_CARE_UNIT_Time (min)`)))) %>% 
+  
+  mutate (`Surgery_Time (minute)`= 
+            as.numeric(gsub(",", ".", gsub("\\.", "", Patients$`Surgery_Time (minute)`)))) %>% 
+  
+  mutate(Arrival_Date=as.Date(Arrival_Date, format='%d/%m/%Y')) %>%
+  
+  mutate(`Arrival_Time(min)` = as.numeric(`Arrival_Time(min)`)) %>% 
+  select(-`Arrival Time`)
+
+Patients=Patients[,c("Patient_ID","Surgery_Type",  "Arrival_Date","Arrival_Time(min)",  "Section",  "Surgery_Time (minute)",  "POST_ANESTHESIA_CARE_UNIT_Time (min)",  "Length_of_Stay(days)")]
+```
+
+
+** Exploratory analysis **
+
+A questo punto sono state effettuate delle prima analisi e statistiche descrittive per avere una prima idea sulla struttura del dataset e sul suo contenuto.
+
+E' stato realizzato un istogramma che suddivide i pazienti in base al numero di giorni di degenza in ospedale. 
+
+```{r, include=T}
+num_patients_for_day <- group_by(Patients, Arrival_Date) %>%
+  summarise(n = n())
+
+g <- ggplot(Patients, aes(x=Patients$`Length_of_Stay(days)`,fill=3 ,color=3, legend=F)) +
+  geom_histogram(position="identity") +
+  theme(legend.position = "none") +
+  labs(title = "Distribuzione di Lenght of Stay")+
+  labs(x = "Length of Stay (days)", y="Count of Patients")
+g
+```
+
+E' possibile notare che nel reparto di medicina interna la lunghezza del periodo di ricovero è principalmente di 0, 1 o 2 giorni. Questo vuol dire che i letti la disposizione dei pazienti nei letti a disposizione del reparto  avviene molto frquentemente. 
+
+Successivamente è stata realizzata una serie storica che risporta, per ogni giorno dell'anno 2015, il numero di letti occupati nel reparto di medicina interna.
+
+```{r, include=T}
+Historical_Info <- Historical_Info %>% 
+  mutate(Date= as.Date(Date, format='%d/%m/%Y'))
+
+ggplot(data = Historical_Info, aes(x = Historical_Info$Date, y = Historical_Info$nr_patients))+
+  geom_line(color = "#003399", size = 0.5) + 
+  theme_classic() + 
+  labs(title = "Andamento dell'utilizzo dei letti")+
+  labs( x="", y="Count of Patients")
+```
+Dal grafico della serie storica evince, ancora una volta, che il numero di letti occupati varia di giorno in giorno; questo è dovuto ai repentini cambiamenti dei pzienti che ogni giorno arrivano e lasciano il reparto. Tuttavia, è possibile vedere che in media il numero di letti occupati è pari a 10.
+
+
+Al fine del'analisi è stato ritenuto opportuno analizzare i pazienti contenuti nel dataset focalizzando l'attenzione sulle variabili Surgery_Type, che indica il tipo di intervento a cui il paziente è stato sottoposto ("Internal Medicine" o "Others"), e "Section", che indica il reparto in cui è stato ricoverato il paziente a seguito dell'intervento ("8000595"=Internal Medicine o "other").
+Si indaga se esistono dei pazienti operati in un altro reparto (Surgery_Type=Others) e ricoverati altrove (Section=other).
+
+
+```{r, warning=FALSE}
+group_by(filter(Patients, Surgery_Type == "Others"), Section) %>%
+  summarise(n = n())
+```
+
+E' possibile vedere che 29 pazienti non sono stati nè operati nè ricoverati in Internal Medicine. Si pensa che questi pazienti non siano utili ai fini dell'analisi e per questo motivo vengono rimossi dal dataset.
+
+```{r}
+Patients_IM <- Patients[-which(Patients$Surgery_Type=="Others" & Patients$Section=="other"),]
+```
+
+A questo punto viene creata la variabile 'Hospitalization_min' che indica il tempo totale di degenza del paziente espresso in minuti. E' dato, quindi, dalla somma del tempo di degenza post anestesia e dei giorni di ricovero, anch'essi trasformati in minuti.
+
+```{r, warning=FALSE}
+
+Patients_IM$`Hospitalization_min` = Patients_IM$`Length_of_Stay(days)`*1440 +
+  Patients_IM$`POST_ANESTHESIA_CARE_UNIT_Time (min)`
+
+#si ordinano i dataset inordine crescente in base alla data per inizializzare i cicli
+Patients_IM = Patients_IM[order(as.Date(Patients_IM$Arrival_Date), decreasing = F),]
+Historical_Info = Historical_Info[order(as.Date(Historical_Info$Date), decreasing = F),]
+```
+
+### Methodological Approach
+
+L'analisi proposta si basa sullo sviluppo di un ciclo utile ad analizzare il flusso dei pazienti durante il 2015 con l'obiettivo di fornire informazioni sulla situazione attuale dei pazienti seguiti tramite le condizioni di policy stabilite dall'ospedale. In particolare, ci si focalizza sul calcolo del tempo d'attesa che è un'informazione che non viene fornita nei dati e che si assume non debba superare i 60 minuti.
+Successivamente, invece, vengono sviluppati due algoritmi che hanno l'obiettivo di verificare se le prestazioni dell'ospedale migliorano al variare di alcune condizioni delle policy: nel primo caso si si rinuncia al vincolo che il tempo di attesa sia inferiore a 60 minuti, nel secondo caso, invece, si valuta la possibilità di non limitare il numero di letti di medicina interna a 19.
+In entrambi gli algoritmi sviluppati si vuole salvaguardare la richiesta dei medici che lavorano in medicina interna di avere i pazienti operati da loro ricoverati nello stesso reparto.
+
+Sia per l'analisi iniziale che per i due algoritmi successivamente sviluppati è stato necessario costruire dei dataframe di supporto dati da:
+  - bed_list: è un dataframe composto da 19 righe (una per ogni letto), in cui vengono inserite e aggiornate ad ogni iterazione dell'algoritmo le seguenti informazioni:"Bed Number", "Patient", "Date", "Arrival_Time", "Surgery_Time", "Remaining_min_hospitalization";
+  - WaitingList e OutOfBed: dataframe inizialmente vuoti avente come attributi gli stessi del dataset Patients;
+  - OccupiedBeds: eredita la struttura dal dataset iniziale Historical_Info mantenendo solamente la prima riga, ovvero le informazioni sul numero di letti occupati nella data 01-01-2015.
+ 
+```{r}
+bed_list = data.frame(1:19, 1:19, 1:19, 1:19, 1:19, 1:19)
+
+colnames(bed_list)[1] <- "Bed Number"
+colnames(bed_list)[2] <- "Patient"
+colnames(bed_list)[3] <- "Date"
+colnames(bed_list)[4] <- "Arrival_Time"
+colnames(bed_list)[5] <- "Surgery_Time"
+colnames(bed_list)[6] <- "Remaining_min_hospitalization"
+
+for (i in 1:19){
+  bed_list$Patient = 0
+  bed_list$Date = Patients_IM[1,3][[1]]
+  bed_list$Arrival_Time = 0
+  bed_list$Surgery_Time = 0
+  bed_list$Remaining_min_hospitalization = 0
+}
+
+
+
+waiting_list = Patients_IM[0,]
+
+without_bed = Patients_IM[0,]
+
+occupied_beds = Historical_Info[1, ] 
+```
+
+
+** Analisi situazione attuale **
+
+E' stato quindi analizzato il flusso di pazienti attuale, ovvero secondo le condizioni di policy correnti. L'algoritmo creato ad hoc per analizzare la situazione dell'ospedale, ripercorre il dataset Patients con un timeframe di un minuto.
+Non appena il paziente arriva in ospedale, viene inserito nella WaitingList, e inizia immediatamente l'operazione, quindi il suo Surgery_Time viene scalato minuto per minuto ad ogni iterazione del ciclo.
+Quanto Surgery_Time supera lo zero diventando negativo, si considera iniziato il tempo d'attesa.
+Se entro un tempo d'attesa inferiore a 60 minuti (Surgery_Time > -59) è disponibile un letto, il paziente viene spostato nella lista OccupiedBeds, altrimenti nella lista OutOfBed. Ogni minuto, inoltre, viene eseguito un upsert delle informazioni sui letti nella lista bed_list in modo tale da monitorare la disponibilità dei letti.
+
+```{r}
+Patients_IM_1 = Patients_IM
+bed_list_1 = bed_list
+without_bed_1 = without_bed
+waiting_list_1 = waiting_list
+occupied_beds_1 = occupied_beds
+new_day = FALSE
+hour = 0
+Arrival_Date = Patients_IM_1[1, 3][[1]]
+Patient_WaitTime_1 = Patients_IM_1[0, ]
+i = 1
+
+while (i == 1){
+  
+  if (Arrival_Date != Patients_IM_1[i, 3][[1]]){
+    new_day = TRUE
+    Arrival_Date = Patients_IM_1[i, 3][[1]]
+  }
+  else{
+    new_day = FALSE
+  }
+  
+  hour = hour + 1
+  
+  if (new_day){ 
+    hour = 0
+  }
+  
+  # alla mezzanotte (hour=0) si salva il numero di letti occupati, la data
+  # e si inserisce la nuova riga in occupied_beds_1
+  if(new_day){ 
+    new_row = occupied_beds_1[1,]
+    new_row$Section = occupied_beds_1[1,1]
+    new_row$Date = Arrival_Date
+    new_row$time = occupied_beds_1[1,3]
+    new_row$`nr_patients` = nrow(bed_list_1[bed_list_1$Remaining_min_hospitalization > 0,]) 
+    # per ottenere il numero di pazienti presenti nei letti si filtrano le righe in cui il letto non è
+    # ancora stato liberato, quindi in cui Remaining_min_hospitalization è non negativo
+    occupied_beds_1 = rbind(occupied_beds_1,new_row)
+  }
+  
+  # timeframe: un minuto
+  for (j in 1:nrow(bed_list_1)){  #j da 1 a 19
+    if (bed_list_1[j, 6] > 0){
+      bed_list_1[j, 6] = bed_list_1[j, 6] - 1  
+      # per ogni paziente nei letti si riducono i minuti di degenza rimanenti 
+      # (bed_list_1[, 6]=Remaining_min_hospitalization) di un minuto
+    }
+  }
+  
+  # si riduce di un minuto il surgery_time dei pazienti nella waiting list
+  # (che stanno effettuando l'operazione)
+  if (nrow(waiting_list_1) > 0){
+    waiting_list_1$`Surgery_Time (minute)` = waiting_list_1$`Surgery_Time (minute)` - 1    
+  }
+  
+  # per ogni ora di ogni giorno si cercano i pazienti arrivati in ospedale e si rimuovono
+  #  da Patients perchè vengono aggiunti in waiting_list
+  waiting_list_1 = rbind(waiting_list_1, Patients_IM_1[Patients_IM_1$Arrival_Date == Arrival_Date &
+                                                         Patients_IM_1$`Arrival_Time(min)` == hour,])
+  
+  Patients_IM_1 = Patients_IM_1[!(Patients_IM_1$Arrival_Date == Arrival_Date & 
+                                    Patients_IM_1$`Arrival_Time(min)` == hour),]
+  
+  #si ordina la waiting list sia per data che per Surgery_Time in modo da avere in cima i pazienti
+  # per cui il Surgery_Time è prossimo allo zero (quando Surgery_time diventa negativo equivale al tempo d'attesa)
+  waiting_list_1 = waiting_list_1[order(waiting_list_1$`Surgery_Time (minute)`, decreasing = FALSE),] 
+  
+  waiting_list_1 = waiting_list_1[order(as.Date(waiting_list_1$Arrival_Date), decreasing = FALSE),]
+  
+  # si cicla la waiting list
+  for (z in 1:nrow(waiting_list_1)){
+      
+      if(nrow(waiting_list_1) == 0){
+        break
+      }
+      
+      not_bed = TRUE
+      
+      # inizia la ricerca del letto 
+      for (j in 1:19){
+        # per ogni letto libero in bed list 
+        # (bed_list_1[j, 6] = Remaining_min_hospitalization, se <0 -> letto libero) 
+        # si inserisce il paziente prendendolo da waiting list (si selezionano i pazienti 
+        # per cui waiting_list_1[z, 6] = Surgery_Time <= 0, ovvero quelli che hanno finito l'operazione).
+       
+        # il paziente viene poi rimosso da waiting list e aggiunto in Patient_WaitTime 
+        # che servirà poi per calcolare la media del tempo d'attesa.
+        
+        if (bed_list_1[j, 6] <= 0 & waiting_list_1[z, 6] <= 0){
+          Patient_WaitTime_1 = rbind(Patient_WaitTime_1, waiting_list_1[z, ])
+          bed_list_1[j, 2] = waiting_list_1[z, 1]
+          bed_list_1[j, 3] = waiting_list_1[z, 3][[1]]
+          bed_list_1[j, 4] = waiting_list_1[z, 4]
+          bed_list_1[j, 5] = waiting_list_1[z, 6]
+          bed_list_1[j, 6] = waiting_list_1[z, 9]
+          not_bed = FALSE
+          waiting_list_1[z, ][[1]] = "out"
+          break
+        }
+        
+      }
+      
+      #se invece non esiste un letto libero (Remaining_min_hospitalization > 0 -> not_bed=T),
+      #i pazienti che hanno raggiunto i 60 min di attesa, vengono mandati in un altro reparto 
+      # e quindi aggiunti nella lista without bed e, come precedetemente, nella lista Patient_WaitTime 
+      # che servirà poi per calcolare poi il tempo d'attesa medio di tutti i pazienti, 
+      # sia quelli ricoverati internamente che in altri reparti.
+      
+      if (not_bed & waiting_list_1[z, 6] < -59){
+          Patient_WaitTime_1 = rbind(Patient_WaitTime_1, waiting_list_1[z, ])
+          without_bed_1 = rbind(without_bed_1, waiting_list_1[z, ])
+      }
+  
+  }
+  
+  #si rimuovono dalla waiting list i pazienti che hanno trovato un letto in medicina interna
+  waiting_list_1 = waiting_list_1[!(waiting_list_1$`Surgery_Time (minute)` < -59 | 
+                                      waiting_list_1$Patient_ID == "out"), ]
+  
+  #il ciclo finisce quando si sono "percorsi" tutti i pazienti nel dataset iniziale
+  if(nrow(Patients_IM_1) == 0){break}
+  
+}
+
+```
+
+Due misure di interesse estrapolate grazie a questa prima analisi del flusso dei pazienti sono:
+  - il tempo medio di attesa che i pazienti devono attendere prima di essere assegnati ad un letto a seguito dell'operazione;
+  - il numero di pazienti per cui non era disponibile un letto nel reparto di medicina interna e che quindi sono stati ricoverati altrove a seguito dell'operazione, sempre entro i 60 minuti di attesa. 
+  
+```{r}
+results1=as.data.frame(abs(mean(Patient_WaitTime_1$`Surgery_Time (minute)`)))
+colnames(results1)='Tempo medio di attesa'
+results1$`Pazienti ricoverati in alti reparti` = nrow(without_bed_1)
+kable(results1)
+```
+
+
+
+**Primo algoritmo**
+
+Il primo algoritmo tiene conto della disponibilità di soli 19 letti in medicina interna e del vincolo di tenere i pazienti operati in medicina interna nello
+stesso reparto, ma si rinuncia al vincolo che il tempo di attesa sia minore
+di 60 minuti. In questo caso, vengono considerate solamente le osservazioni
+per cui la variabile SurgeryType assume l'attributo Internal Medicine poichè
+l'obiettivo è accogliere in modo efficace solamente i pazienti che subiscono
+in intervento nel reparto in analisi. A tal proposito, non viene impostato
+nessun vincolo per quanto riguarda il tempo di attesa per verificare se il
+reparto di Medicina Interna riesce ad accogliere tutti i pazienti nei 19 letti.
+
+Come nell'analisi precedente, anche questo algoritmo, ripercorre il dataset Patients con un timeframe di un minuto. Il paziente non appena arriva in ospedale viene inserito nella WaitingList e, da questo momento, inizia immediatamente l'operazione. Una volta terminato il tempo di operazione necessario per l'intervento, incomincia il tempo di attesa. Successivamente, tramite un upsert, se è presente un letto libero nella lista bed_list, viene inserito in quest'ultima, memorizzando, in particolare, il tempo di attesa. In questo caso, anche se il tempo di attesa supera i 60 minuti (come da policy dell'ospedale), il paziente continua ad attendere finchÃ© non si libera un letto.
+
+```{r}
+
+#il seguente ciclo ha la stessa stuttura del precedente. 
+#Per questo motivo si commentano solamente le parti che differiscono dal suddetto.
+
+Patients_IM_2 = subset(Patients_IM, (Surgery_Type == "Internal_Medicine"))
+bed_list_2 = bed_list
+waiting_list_2 = waiting_list
+occupied_beds_2 = occupied_beds
+new_day = FALSE
+hour = 0
+Arrival_Date = Patients_IM_2[1, 3][[1]]
+i = 1
+Patient_WaitTime_2 = Patients_IM_2[0, ]
+
+while (i == 1){
+  
+  if (Arrival_Date != Patients_IM_2[i, 3][[1]]){
+    new_day = TRUE
+    Arrival_Date = Patients_IM_2[i, 3][[1]]
+  }
+  else{
+    new_day = FALSE
+  }
+  
+  hour = hour + 1
+  
+  if (new_day){
+    hour = 0
+  }
+  
+  
+  if(new_day){
+    new_row = occupied_beds_2[1,]
+    new_row$Section = NA
+    new_row$Date = Arrival_Date
+    new_row$time = NA
+    new_row$`nr_patients` = nrow(bed_list_2[bed_list_2$Remaining_min_hospitalization > 0,])
+    occupied_beds_2 = rbind(occupied_beds_2,new_row)
+  }
+  
+  for (j in 1:nrow(bed_list_2)){
+    if (bed_list_2[j, 6] > 0){
+      bed_list_2[j, 6] = bed_list_2[j, 6] - 1
+    }
+  }
+  
+  if (nrow(waiting_list_2) > 0){
+    waiting_list_2$`Surgery_Time (minute)` = waiting_list_2$`Surgery_Time (minute)` - 1
+  }
+  
+
+  waiting_list_2 = rbind(waiting_list_2, Patients_IM_2[Patients_IM_2$Arrival_Date == Arrival_Date &
+                                                         Patients_IM_2$`Arrival_Time(min)` == hour,])
+  
+    
+  Patients_IM_2 = Patients_IM_2[!(Patients_IM_2$Arrival_Date == Arrival_Date &
+                                    Patients_IM_2$`Arrival_Time(min)` == hour),]
+  
+  
+  waiting_list_2 = waiting_list_2[order(waiting_list_2$`Surgery_Time (minute)`, decreasing = FALSE),]
+  
+
+  waiting_list_2 = waiting_list_2[order(as.Date(waiting_list_2$Arrival_Date), decreasing = FALSE),]
+  
+  
+  for (z in 1:nrow(waiting_list_2)){
+      
+  
+      if(nrow(waiting_list_2) == 0){
+        break
+      }
+      
+      not_bed = TRUE
+      
+      
+      for (j in 1:nrow(bed_list_2)){
+        
+        
+        if (bed_list_2[j, 6] <= 0 & waiting_list_2[z, 6] <= 0){
+          Patient_WaitTime_2 = rbind(Patient_WaitTime_2, waiting_list_2[z, ])
+          bed_list_2[j, 2] = waiting_list_2[z, 1]
+          bed_list_2[j, 3] = waiting_list_2[z, 3][[1]]
+          bed_list_2[j, 4] = waiting_list_2[z, 4]
+          bed_list_2[j, 5] = waiting_list_2[z, 6]
+          bed_list_2[j, 6] = waiting_list_2[z, 9]
+          waiting_list_2[z, ][[1]] = "out"
+          not_bed = FALSE
+          break
+        }
+        
+        # si elimina la parte del ciclo in cui, se il paziente ha un tempo d'attesa >59 minuti 
+        # (surgery time <-59), viene mandato in un altro reparto e inserito nella lista without_bed.
+      }
+  
+  }
+  
+
+  waiting_list_2 = waiting_list_2[!waiting_list_2$Patient_ID == "out", ]
+  
+
+  if(nrow(Patients_IM_2) == 0){break}
+}
+
+```
+
+Anche a seguito di questa analisi, in cui è stato rimosso il vincolo del tempo di attesa di 60 minuti, è interessante indagare:
+  - il tempo medio di attesa che i pazienti devono attendere prima di essere assegnati ad un letto a seguito dell'operazione;
+  - il numero di pazienti che hanno dovuto attendere più di 60 minuti a seguito dell'operazione, prima di essere assegnati ad un letto disponibile. 
+  
+```{r}
+results2=as.data.frame(abs(mean(Patient_WaitTime_2$`Surgery_Time (minute)`)))
+colnames(results2)='Tempo medio di attesa'
+results2$`Pazienti con un tempo d'attesa maggiore di 60 minuti` =
+  nrow(Patient_WaitTime_2[Patient_WaitTime_2$`Surgery_Time (minute)`<= -60 ,])
+kable(results2)
+```
+
+```{r}
+length(Patient_WaitTime_2$`Surgery_Time (minute)`[
+  which(Patient_WaitTime_2$`Surgery_Time (minute)`<=-120)])
+abs(min(Patient_WaitTime_2$`Surgery_Time (minute)`)) #waiting time max
+
+```
+
+
+
+**Secondo algoritmo**
+Il secondo algoritmo sviluppato conserva la rigidità della policy sul tempo
+d'attesa e la clausula di non spostare i pazienti in altri reparti. La differenza è che, in questo caso, è possibile aggiungere nuovi letti al reparto. L'obiettivo di questo procedimento è di calcolare il numero ottimale di letti di cui avrebbe
+bisogno il reparto di Internal Medicine per essere "autosuffciente" e per
+rispettare la regola dei 60 minuti di attesa massima. La struttura dell'algoritmo è simile a quello precedente, con la differenza che, se il tempo di attesa del
+paziente supera i 60 minuti, viene aggiunto un nuovo letto alla lista bed_list, per accogliere il paziente nel proprio reparto e rispettare la policy.
+Anche in questo caso, vengono considerate solamente le osservazioni
+per cui la variabile SurgeryType assume l'attributo Internal Medicine poichè
+l'obiettivo è capire il numero minimo di letti necessari per riuscire ad accogliere almeno tutti i pazienti operati nel reparto in analisi.
+
+
+```{r}
+
+#il seguente ciclo ha la stessa stuttura del primo. 
+#Per questo motivo si commentano solamente le parti che differiscono dal suddetto.
+
+Patients_IM_3 = subset(Patients_IM, (Surgery_Type == "Internal_Medicine"))
+bed_list_3 = bed_list
+waiting_list_3 = waiting_list
+occupied_beds_3 = occupied_beds
+new_day = FALSE
+hour = 0
+Arrival_Date = Patients_IM_3[1, 3][[1]]
+Patient_WaitTime_3 = Patients_IM_3[0, ]
+i = 1
+
+while (i == 1){
+  
+  if (Arrival_Date != Patients_IM_3[i, 3][[1]]){
+    new_day = TRUE
+    Arrival_Date = Patients_IM_3[i, 3][[1]]
+  }
+  else{
+    new_day = FALSE
+  }
+  
+  hour = hour + 1
+  
+  if (new_day){
+    hour = 0
+  }
+  
+  if(new_day){
+    new_row = occupied_beds_3[1,]
+    new_row$Section = NA
+    new_row$Date = Arrival_Date
+    new_row$time = NA
+    new_row$`nr_patients` = nrow(bed_list_3[bed_list_3$Remaining_min_hospitalization > 0,])
+    occupied_beds_3 = rbind(occupied_beds_3,new_row)
+  }
+  
+ 
+  for (j in 1:nrow(bed_list_3)){
+    if (bed_list_3[j, 6] > 0){
+      bed_list_3[j, 6] = bed_list_3[j, 6] - 1
+    }
+  }
+  
+  
+  if (nrow(waiting_list_3) > 0){
+    waiting_list_3$`Surgery_Time (minute)` = waiting_list_3$`Surgery_Time (minute)` - 1
+  }
+  
+  
+  waiting_list_3 = rbind(waiting_list_3, Patients_IM_3[Patients_IM_3$Arrival_Date == Arrival_Date &
+                                                         Patients_IM_3$`Arrival_Time(min)` == hour,])
+  
+  
+  Patients_IM_3 = Patients_IM_3[!(Patients_IM_3$Arrival_Date == Arrival_Date &
+                                    Patients_IM_3$`Arrival_Time(min)` == hour),]
+  
+  
+  waiting_list_3 = waiting_list_3[order(waiting_list_3$`Surgery_Time (minute)`, decreasing = FALSE),]
+  
+  waiting_list_3 = waiting_list_3[order(as.Date(waiting_list_3$Arrival_Date), decreasing = FALSE),]
+  
+  
+  for (z in 1:nrow(waiting_list_3)){
+      
+    
+      if(nrow(waiting_list_3) == 0){
+        break
+      }
+      
+      not_bed = TRUE
+      
+      
+      for (j in 1:nrow(bed_list_3)){
+        
+        
+        if (bed_list_3[j, 6] <= 0 & waiting_list_3[z, 6] <= 0){
+          Patient_WaitTime_3 = rbind(Patient_WaitTime_3, waiting_list_3[z, ])
+          bed_list_3[j, 2] = waiting_list_3[z, 1]
+          bed_list_3[j, 3] = waiting_list_3[z, 3][[1]]
+          bed_list_3[j, 4] = waiting_list_3[z, 4]
+          bed_list_3[j, 5] = waiting_list_3[z, 6]
+          bed_list_3[j, 6] = waiting_list_3[z, 9]
+          not_bed = FALSE
+          waiting_list_3[z, ][[1]] = "out"
+          break
+        }
+        
+      }
+      
+      # in questo caso per ogni paziente in attesa, se non c'è un letto disponibile viene aggiunto. 
+      # (add a row in bed_list3)
+      if (not_bed & waiting_list_3[z, 6] < -59){
+          Patient_WaitTime_3 = rbind(Patient_WaitTime_3, waiting_list_3[z, ])
+          new_row = bed_list_3[0, ]
+          new_row[1, 1] = j+1
+          new_row[1, 2] = waiting_list_3[z, 1]
+          new_row[1, 3] = waiting_list_3[z, 3][[1]]
+          new_row[1, 4] = waiting_list_3[z, 4]
+          new_row[1, 5] = waiting_list_3[z, 6]
+          new_row[1, 6] = waiting_list_3[z, 9]
+          bed_list_3 = rbind(bed_list_3, new_row)
+      }
+  
+  }
+  
+  waiting_list_3 = waiting_list_3[!(waiting_list_3$`Surgery_Time (minute)` < -59 |
+                                      waiting_list_3$Patient_ID == "out"), ]
+  
+
+  if(nrow(Patients_IM_3) == 0){break}
+  
+}
+
+```
+
+Quest'ultimo algoritmo, in cui si indaga il numero ottimale di letti affinchè il reparto di medicina interna sia "autosufficiente", fornisce i due seguenti risultati:
+  - il tempo medio di attesa che i pazienti devono attendere prima di essere assegnati ad un letto a seguito dell'operazione;
+  - il numero di letti necessari affinchè tutti i pazienti operati in medicina interna non debbano essere spostati in altri reparti per la degenza post operatoria. 
+  
+```{r}
+results3=as.data.frame(abs(mean(Patient_WaitTime_3$`Surgery_Time (minute)`)))
+colnames(results3)='Tempo medio di attesa'
+results3$`Numero di letti necessari per Internal Medicine` = nrow(bed_list_3)
+kable(results3)
+```
+
+Per la valutazione dei risultati, le conslusioni e i possibili sviluppi futuri si rimanda al report.
+
